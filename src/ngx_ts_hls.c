@@ -195,6 +195,7 @@ ngx_ts_hls_pat_handler(ngx_ts_hls_t *hls)
     var->prog = prog;
     var->file.fd = NGX_INVALID_FILE;
     var->file.log = ts->log;
+    var->last_seg_end_dts = 0;  /* Initialize for discontinuity detection */
 
     var->nsegs = hls->conf->nsegs;
     var->segs = ngx_pcalloc(ts->pool,
@@ -380,13 +381,27 @@ ngx_ts_hls_close_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var,
     /* Detect discontinuity for continuous mode */
     seg->discont = 0;
     if (hls->conf->continuous) {
-        /* Check if this is the first segment after a restart */
+        /* Method 1: Check if this is the first segment after a restart (from playlist restore) */
         if (hls->discont_from > 0 && seg->id == hls->discont_from) {
             seg->discont = 1;
             hls->discont_from = 0;  /* Reset after use */
             ngx_log_debug1(NGX_LOG_DEBUG_CORE, ts->log, 0,
-                           "ts hls discontinuity at segment %ui", seg->id);
+                           "ts hls discontinuity at segment %ui (from restore)", seg->id);
         }
+        /* Method 2: Detect timing gaps for fast restarts */
+        else if (var->last_seg_end_dts > 0) {
+            int64_t gap = var->seg_dts - var->last_seg_end_dts;
+            /* Detect discontinuity if gap > 2 seconds or negative (clock reset) */
+            if (gap > 180000 || gap < -90000) {  /* 90kHz timescale: 2s = 180000, 1s = 90000 */
+                seg->discont = 1;
+                ngx_log_debug3(NGX_LOG_DEBUG_CORE, ts->log, 0,
+                               "ts hls discontinuity at segment %ui (timing gap: %L, threshold: 180000)",
+                               seg->id, gap);
+            }
+        }
+
+        /* Update last segment end time for next discontinuity detection */
+        var->last_seg_end_dts = var->seg_dts + d;
     }
 
     if (ngx_close_file(var->file.fd) == NGX_FILE_ERROR) {
@@ -470,18 +485,15 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         seg = &var->segs[(var->seg + i) % var->nsegs];
 
         if (seg->duration) {
+            /* Add discontinuity tag BEFORE this segment if it has the discontinuity flag */
+            if (seg->discont) {
+                p = ngx_sprintf(p, "#EXT-X-DISCONTINUITY\n");
+            }
+
             p = ngx_sprintf(p, "#EXTINF:%.3f,\n", seg->duration / 90000.);
 
             /* Single-variant mode: {stream_name}-{seg}.ts */
             p = ngx_sprintf(p, "%V-%ui.ts\n", &hls->name, seg->id);
-
-            /* Add discontinuity tag AFTER this segment if the NEXT segment has discontinuity */
-            if (i + 1 < var->nsegs) {
-                ngx_ts_hls_segment_t *next_seg = &var->segs[(var->seg + i + 1) % var->nsegs];
-                if (next_seg->duration && next_seg->discont) {
-                    p = ngx_sprintf(p, "#EXT-X-DISCONTINUITY\n");
-                }
-            }
         }
     }
 
@@ -1060,11 +1072,15 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         var->seg = max_seg_id + 1;
         hls->discont_from = var->seg;
 
+        /* Reset timing state - will be set properly when first segment after restart is processed */
+        var->last_seg_end_dts = 0;
+
         ngx_log_debug2(NGX_LOG_DEBUG_CORE, ts->log, 0,
                        "ts hls restored: next_seg=%ui, discont_from=%ui",
                        var->seg, hls->discont_from);
     } else {
         hls->discont_from = 0;
+        var->last_seg_end_dts = 0;
     }
 
     return NGX_OK;
