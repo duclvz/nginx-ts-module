@@ -21,6 +21,7 @@ typedef struct {
     ngx_msec_t             analyze;
     size_t                 max_size;
     ngx_uint_t             nsegs;
+    ngx_flag_t             continuous; /* hls_continuous behavior */
 } ngx_ts_hls_conf_t;
 
 
@@ -44,9 +45,11 @@ typedef struct {
     ngx_uint_t             seg;
     uint64_t               seg_dts;
 
+    ngx_uint_t             discont_from;  /* first new segment id after restart */
+
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;
-    ngx_str_t              path;
+    ngx_str_t              path;      /* prefix: <dir>/<name>- */
 
     ngx_ts_program_t      *prog;
 } ngx_ts_hls_variant_t;
@@ -56,12 +59,13 @@ typedef struct {
     ngx_ts_stream_t       *ts;
     ngx_ts_hls_conf_t     *conf;
 
+    ngx_str_t              name;  /* stream name */
+
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;
-    ngx_str_t              path;
+    ngx_str_t              path;  /* dir: <base> */
 
-    ngx_ts_hls_variant_t  *vars;
-    ngx_uint_t             nvars;
+    ngx_ts_hls_variant_t   var;   /* single-variant only */
 
     ngx_uint_t             done;  /* unsigned  done:1; */
 } ngx_ts_hls_t;
