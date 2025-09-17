@@ -34,6 +34,8 @@ static ngx_int_t ngx_ts_hls_manage_directory(ngx_tree_ctx_t *ctx,
 static ngx_int_t ngx_ts_hls_delete_directory(ngx_tree_ctx_t *ctx,
     ngx_str_t *path);
 static ngx_int_t ngx_ts_hls_delete_file(ngx_tree_ctx_t *ctx, ngx_str_t *path);
+static ngx_int_t ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls,
+    ngx_ts_hls_variant_t *var);
 
 
 ngx_ts_hls_t *
@@ -52,13 +54,23 @@ ngx_ts_hls_create(ngx_ts_hls_conf_t *conf, ngx_ts_stream_t *ts, ngx_str_t *name)
     hls->conf = conf;
     hls->ts = ts;
 
-    hls->path.len = conf->path->name.len + 1 + name->len;
+    /* Store stream name for single-variant HLS naming */
+    hls->name.len = name->len;
+    hls->name.data = ngx_pnalloc(ts->pool, name->len + 1);
+    if (hls->name.data == NULL) {
+        return NULL;
+    }
+    ngx_memcpy(hls->name.data, name->data, name->len);
+    hls->name.data[name->len] = '\0';
+
+    /* Set base directory path (no subdirectory for single-variant mode) */
+    hls->path.len = conf->path->name.len;
     hls->path.data = ngx_pnalloc(ts->pool, hls->path.len + 1);
     if (hls->path.data == NULL) {
         return NULL;
     }
-
-    ngx_sprintf(hls->path.data, "%V/%V%Z", &conf->path->name, name);
+    ngx_memcpy(hls->path.data, conf->path->name.data, conf->path->name.len);
+    hls->path.data[hls->path.len] = '\0';
 
     cln = ngx_pool_cleanup_add(ts->pool, 0);
     if (cln == NULL) {
@@ -88,7 +100,10 @@ ngx_ts_hls_cleanup(void *data)
     ngx_ts_hls_segment_t  *seg;
     ngx_ts_hls_variant_t  *var;
 
-    hls->done = 1;
+    /* Only set done=1 if continuous mode is disabled */
+    if (!hls->conf->continuous) {
+        hls->done = 1;
+    }
 
     ts = hls->ts;
 
@@ -151,7 +166,6 @@ ngx_ts_hls_pat_handler(ngx_ts_hls_t *hls)
 {
     size_t                 len;
     u_char                *p;
-    ngx_uint_t             n;
     ngx_ts_stream_t       *ts;
     ngx_ts_program_t      *prog;
     ngx_ts_hls_variant_t  *var;
@@ -164,111 +178,65 @@ ngx_ts_hls_pat_handler(ngx_ts_hls_t *hls)
 
     ngx_log_debug0(NGX_LOG_DEBUG_CORE, ts->log, 0, "ts hls pat");
 
-    hls->nvars = ts->nprogs;
-    hls->vars = ngx_pcalloc(ts->pool,
-                            sizeof(ngx_ts_hls_variant_t) * ts->nprogs);
+    /* Single-variant mode: use only the first program */
+    if (ts->nprogs == 0) {
+        return NGX_ERROR;
+    }
+
+    hls->nvars = 1;
+    hls->vars = ngx_pcalloc(ts->pool, sizeof(ngx_ts_hls_variant_t));
     if (hls->vars == NULL) {
         return NGX_ERROR;
     }
 
-    if (hls->nvars > 1) {
-        /* index.m3u8 */
+    prog = &ts->progs[0];  /* Use first program only */
+    var = &hls->vars[0];
 
-        len = hls->path.len + sizeof("/index.m3u8");
+    var->prog = prog;
+    var->file.fd = NGX_INVALID_FILE;
+    var->file.log = ts->log;
 
-        hls->m3u8_path = ngx_pnalloc(ts->pool, len);
-        if (hls->m3u8_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_sprintf(hls->m3u8_path, "%V/index.m3u8%Z", &hls->path);
-
-        /* index.m3u8.tmp */
-
-        len += sizeof(".tmp") - 1;
-
-        hls->m3u8_tmp_path = ngx_pnalloc(ts->pool, len);
-        if (hls->m3u8_tmp_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_sprintf(hls->m3u8_tmp_path, "%s.tmp%Z", hls->m3u8_path);
+    var->nsegs = hls->conf->nsegs;
+    var->segs = ngx_pcalloc(ts->pool,
+                           sizeof(ngx_ts_hls_segment_t) * hls->conf->nsegs);
+    if (var->segs == NULL) {
+        return NGX_ERROR;
     }
 
-    for (n = 0; n < ts->nprogs; n++) {
-        prog = &ts->progs[n];
-        var = &hls->vars[n];
+    /* Segment path: {stream_name}-{seg}.ts */
+    len = hls->path.len + 1 + hls->name.len + 1 + NGX_INT_T_LEN + sizeof(".ts");
+    p = ngx_pnalloc(ts->pool, len);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
 
-        var->prog = prog;
-        var->file.fd = NGX_INVALID_FILE;
-        var->file.log = ts->log;
+    var->path.data = p;
+    p = ngx_sprintf(p, "%V/%V-", &hls->path, &hls->name);
+    var->path.len = p - var->path.data;
 
-        var->nsegs = hls->conf->nsegs;
-        var->segs = ngx_pcalloc(ts->pool,
-                               sizeof(ngx_ts_hls_segment_t) * hls->conf->nsegs);
-        if (var->segs == NULL) {
+    /* Playlist path: {stream_name}.m3u8 */
+    len = hls->path.len + 1 + hls->name.len + sizeof(".m3u8");
+    var->m3u8_path = ngx_pnalloc(ts->pool, len);
+    if (var->m3u8_path == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_sprintf(var->m3u8_path, "%V/%V.m3u8%Z", &hls->path, &hls->name);
+
+    /* Playlist temp path: {stream_name}.m3u8.tmp */
+    len += sizeof(".tmp") - 1;
+    var->m3u8_tmp_path = ngx_pnalloc(ts->pool, len);
+    if (var->m3u8_tmp_path == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_sprintf(var->m3u8_tmp_path, "%s.tmp%Z", var->m3u8_path);
+
+    /* Restore playlist state for continuous mode */
+    if (hls->conf->continuous) {
+        if (ngx_ts_hls_restore_playlist(hls, var) != NGX_OK) {
             return NGX_ERROR;
         }
-
-        /* [<prog>.]<seg>.ts */
-
-        len = hls->path.len + 1 + NGX_INT_T_LEN + sizeof(".ts");
-
-        if (hls->nvars > 1) {
-            len += NGX_INT_T_LEN + 1;
-        }
-
-        p = ngx_pnalloc(ts->pool, len);
-        if (p == NULL) {
-            return NGX_ERROR;
-        }
-
-        var->path.data = p;
-
-        if (hls->nvars > 1) {
-            p = ngx_sprintf(p, "%V/%ui.",
-                            &hls->path, (ngx_uint_t) prog->number);
-
-        } else {
-            p = ngx_sprintf(p, "%V/", &hls->path);
-        }
-
-        var->path.len = p - var->path.data;
-
-        /* (<prog>|index).m3u8 */
-
-        len = hls->path.len + 1 + sizeof(".m3u8");
-
-        if (hls->nvars > 1) {
-            len += NGX_INT_T_LEN;
-
-        } else {
-            len += sizeof("index") - 1;
-        }
-
-        var->m3u8_path = ngx_pnalloc(ts->pool, len);
-        if (var->m3u8_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        if (hls->nvars > 1) {
-            ngx_sprintf(var->m3u8_path, "%V/%ui.m3u8%Z",
-                        &hls->path, (ngx_uint_t) prog->number);
-
-        } else {
-            ngx_sprintf(var->m3u8_path, "%V/index.m3u8%Z", &hls->path);
-        }
-
-        /* (<prog>|index).m3u8.tmp */
-
-        len += sizeof(".tmp") - 1;
-
-        var->m3u8_tmp_path = ngx_pnalloc(ts->pool, len);
-        if (var->m3u8_tmp_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_sprintf(var->m3u8_tmp_path, "%s.tmp%Z", var->m3u8_path);
     }
 
     return NGX_OK;
@@ -409,6 +377,18 @@ ngx_ts_hls_close_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var,
     seg->duration = d;
     seg->size = var->file.offset;
 
+    /* Detect discontinuity for continuous mode */
+    seg->discont = 0;
+    if (hls->conf->continuous) {
+        /* Check if this is the first segment after a restart */
+        if (hls->discont_from > 0 && seg->id == hls->discont_from) {
+            seg->discont = 1;
+            hls->discont_from = 0;  /* Reset after use */
+            ngx_log_debug1(NGX_LOG_DEBUG_CORE, ts->log, 0,
+                           "ts hls discontinuity at segment %ui", seg->id);
+        }
+    }
+
     if (ngx_close_file(var->file.fd) == NGX_FILE_ERROR) {
         ngx_log_error(NGX_LOG_ALERT, ts->log, ngx_errno,
                       ngx_close_file_n " \"%s\" failed", var->file.name.data);
@@ -469,9 +449,7 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         }
     }
 
-    if (hls->done) {
-        len += sizeof("\n#EXT-X-ENDLIST\n") - 1;
-    }
+    /* Never add EXT-X-ENDLIST for nginx-rtmp-module compatibility */
 
     data = ngx_alloc(len, ts->log);
     if (data == NULL) {
@@ -494,20 +472,20 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         if (seg->duration) {
             p = ngx_sprintf(p, "#EXTINF:%.3f,\n", seg->duration / 90000.);
 
-            if (hls->nvars > 1) {
-                p = ngx_sprintf(p, "%ui.%ui.ts\n",
-                                (ngx_uint_t) var->prog->number, seg->id);
+            /* Single-variant mode: {stream_name}-{seg}.ts */
+            p = ngx_sprintf(p, "%V-%ui.ts\n", &hls->name, seg->id);
 
-            } else {
-                p = ngx_sprintf(p, "%ui.ts\n", seg->id);
+            /* Add discontinuity tag AFTER this segment if the NEXT segment has discontinuity */
+            if (i + 1 < var->nsegs) {
+                ngx_ts_hls_segment_t *next_seg = &var->segs[(var->seg + i + 1) % var->nsegs];
+                if (next_seg->duration && next_seg->discont) {
+                    p = ngx_sprintf(p, "#EXT-X-DISCONTINUITY\n");
+                }
             }
         }
     }
 
-    if (hls->done) {
-        p = ngx_cpymem(p, "\n#EXT-X-ENDLIST\n",
-                       sizeof("\n#EXT-X-ENDLIST\n") - 1);
-    }
+    /* Never add EXT-X-ENDLIST for nginx-rtmp-module compatibility */
 
     rc = ngx_ts_hls_write_file(var->m3u8_path, var->m3u8_tmp_path, data,
                                p - data, ts->log);
@@ -649,6 +627,7 @@ ngx_ts_hls_open_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
 
     path = &var->path;
 
+    /* Generate segment name: {stream_name}-{seg}.ts */
     n = ngx_sprintf(path->data + path->len, "%ui.ts%Z", var->seg) - path->data
         - 1;
 
@@ -955,6 +934,11 @@ ngx_ts_hls_set_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             continue;
         }
 
+        if (ngx_strcmp(value[i].data, "continuous") == 0) {
+            /* continuous is enabled by default, this is for compatibility */
+            continue;
+        }
+
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                            "invalid parameter \"%V\"", &value[i]);
         return NGX_CONF_ERROR;
@@ -983,6 +967,7 @@ ngx_ts_hls_set_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     hls->analyze = analyze ? analyze : min_seg;
     hls->max_size = max_size;
     hls->nsegs = nsegs;
+    hls->continuous = 1;  /* enabled by default for nginx-rtmp-module compatibility */
 
     if (clean) {
         hls->path->manager = ngx_ts_hls_file_manager;
@@ -999,4 +984,88 @@ ngx_ts_hls_set_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     *field = hls;
 
     return NGX_CONF_OK;
+}
+
+
+static ngx_int_t
+ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
+{
+    ngx_fd_t        fd;
+    ssize_t         n;
+    u_char         *p, *last, *line_start;
+    u_char          buffer[4096];
+    ngx_uint_t      max_seg_id = 0;
+    ngx_ts_stream_t *ts;
+
+    ts = hls->ts;
+
+    /* Try to open existing playlist */
+    fd = ngx_open_file(var->m3u8_path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_INVALID_FILE) {
+        /* No existing playlist, start fresh */
+        hls->discont_from = 0;
+        return NGX_OK;
+    }
+
+    ngx_log_debug1(NGX_LOG_DEBUG_CORE, ts->log, 0,
+                   "ts hls restoring playlist \"%s\"", var->m3u8_path);
+
+    n = ngx_read_fd(fd, buffer, sizeof(buffer) - 1);
+    ngx_close_file(fd);
+
+    if (n <= 0) {
+        hls->discont_from = 0;
+        return NGX_OK;
+    }
+
+    buffer[n] = '\0';
+    p = buffer;
+    last = buffer + n;
+
+    /* Parse playlist to find the highest segment ID */
+    while (p < last) {
+        line_start = p;
+
+        /* Find end of line */
+        while (p < last && *p != '\n' && *p != '\r') {
+            p++;
+        }
+
+        /* Check if this line contains a segment reference */
+        if (p > line_start && *(p-3) == '.' && *(p-2) == 't' && *(p-1) == 's') {
+            u_char *seg_start = p - 1;
+            ngx_uint_t seg_id;
+
+            /* Find the segment ID by looking backwards for the dash */
+            while (seg_start > line_start && *seg_start != '-') {
+                seg_start--;
+            }
+
+            if (*seg_start == '-') {
+                seg_id = ngx_atoi(seg_start + 1, p - seg_start - 4); /* -1 for dash, -3 for .ts */
+                if (seg_id != NGX_ERROR && seg_id > max_seg_id) {
+                    max_seg_id = seg_id;
+                }
+            }
+        }
+
+        /* Skip to next line */
+        while (p < last && (*p == '\n' || *p == '\r')) {
+            p++;
+        }
+    }
+
+    if (max_seg_id > 0) {
+        /* Set the next segment ID to continue from where we left off */
+        var->seg = max_seg_id + 1;
+        hls->discont_from = var->seg;
+
+        ngx_log_debug2(NGX_LOG_DEBUG_CORE, ts->log, 0,
+                       "ts hls restored: next_seg=%ui, discont_from=%ui",
+                       var->seg, hls->discont_from);
+    } else {
+        hls->discont_from = 0;
+    }
+
+    return NGX_OK;
 }
