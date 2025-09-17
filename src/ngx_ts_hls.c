@@ -396,7 +396,7 @@ ngx_ts_hls_close_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var,
                 seg->discont = 1;
                 ngx_log_debug3(NGX_LOG_DEBUG_CORE, ts->log, 0,
                                "ts hls discontinuity at segment %ui (timing gap: %L, threshold: 180000)",
-                               seg->id, gap);
+                               seg->id, gap, 180000);
             }
         }
 
@@ -1055,8 +1055,8 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
 
             if (*seg_start == '-') {
                 seg_id = ngx_atoi(seg_start + 1, p - seg_start - 4); /* -1 for dash, -3 for .ts */
-                if (seg_id != NGX_ERROR && seg_id > max_seg_id) {
-                    max_seg_id = seg_id;
+                if (seg_id != NGX_ERROR && (ngx_uint_t)seg_id > max_seg_id) {
+                    max_seg_id = (ngx_uint_t)seg_id;
                 }
             }
         }
