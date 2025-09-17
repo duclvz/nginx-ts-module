@@ -45,7 +45,6 @@ typedef struct {
     ngx_uint_t             nsegs;
     ngx_uint_t             seg;
     uint64_t               seg_dts;
-    uint64_t               last_seg_end_dts;  /* DTS at end of last segment */
 
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;
