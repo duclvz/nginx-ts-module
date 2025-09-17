@@ -1045,7 +1045,43 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
                 comma++;
             }
             if (comma < p) {
-                current_duration = ngx_atof(line_start + 8, comma - line_start - 8);
+                /* Parse floating point duration manually */
+                u_char *start = line_start + 8;
+                u_char *end = comma;
+                double integer_part = 0.0;
+                double fractional_part = 0.0;
+                double divisor = 1.0;
+                u_char *dot_pos = start;
+                ngx_uint_t found_dot = 0;
+
+                /* Find decimal point */
+                while (dot_pos < end && *dot_pos != '.') {
+                    dot_pos++;
+                }
+                if (dot_pos < end) {
+                    found_dot = 1;
+                }
+
+                /* Parse integer part */
+                u_char *int_end = found_dot ? dot_pos : end;
+                for (u_char *c = start; c < int_end; c++) {
+                    if (*c >= '0' && *c <= '9') {
+                        integer_part = integer_part * 10.0 + (*c - '0');
+                    }
+                }
+
+                /* Parse fractional part */
+                if (found_dot) {
+                    for (u_char *c = dot_pos + 1; c < end; c++) {
+                        if (*c >= '0' && *c <= '9') {
+                            divisor *= 10.0;
+                            fractional_part = fractional_part * 10.0 + (*c - '0');
+                        }
+                    }
+                    fractional_part /= divisor;
+                }
+
+                current_duration = integer_part + fractional_part;
             }
         }
         /* Parse segment file */
