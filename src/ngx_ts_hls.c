@@ -993,7 +993,12 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     u_char         *p, *last, *line_start;
     u_char          buffer[4096];
     ngx_uint_t      max_seg_id = 0;
+    ngx_uint_t      media_sequence = 0;
     ngx_ts_stream_t *ts;
+    ngx_ts_hls_segment_t *seg;
+    ngx_uint_t      seg_count = 0;
+    double          current_duration = 0.0;
+    ngx_uint_t      current_seg_id = 0;
 
     ts = hls->ts;
 
@@ -1020,7 +1025,7 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     p = buffer;
     last = buffer + n;
 
-    /* Parse playlist to find the highest segment ID */
+    /* Parse the playlist to restore segments */
     while (p < last) {
         line_start = p;
 
@@ -1029,8 +1034,22 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
             p++;
         }
 
-        /* Check if this line contains a segment reference */
-        if (p > line_start && *(p-3) == '.' && *(p-2) == 't' && *(p-1) == 's') {
+        /* Parse EXT-X-MEDIA-SEQUENCE */
+        if (p - line_start > 22 && ngx_strncmp(line_start, "#EXT-X-MEDIA-SEQUENCE:", 22) == 0) {
+            media_sequence = ngx_atoi(line_start + 22, p - line_start - 22);
+        }
+        /* Parse EXTINF duration */
+        else if (p - line_start > 8 && ngx_strncmp(line_start, "#EXTINF:", 8) == 0) {
+            u_char *comma = line_start + 8;
+            while (comma < p && *comma != ',') {
+                comma++;
+            }
+            if (comma < p) {
+                current_duration = ngx_atof(line_start + 8, comma - line_start - 8);
+            }
+        }
+        /* Parse segment file */
+        else if (p > line_start && *(p-3) == '.' && *(p-2) == 't' && *(p-1) == 's') {
             u_char *seg_start = p - 1;
             ngx_int_t seg_id;
 
@@ -1040,9 +1059,25 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
             }
 
             if (*seg_start == '-') {
-                seg_id = ngx_atoi(seg_start + 1, p - seg_start - 4); /* -1 for dash, -3 for .ts */
-                if (seg_id != NGX_ERROR && (ngx_uint_t)seg_id > max_seg_id) {
-                    max_seg_id = (ngx_uint_t)seg_id;
+                seg_id = ngx_atoi(seg_start + 1, p - seg_start - 4);
+                if (seg_id != NGX_ERROR) {
+                    current_seg_id = (ngx_uint_t)seg_id;
+
+                    /* Store this segment in the circular buffer at the correct position */
+                    if (seg_count < var->nsegs) {
+                        /* Calculate the circular buffer position for this segment */
+                        ngx_uint_t buffer_pos = current_seg_id % var->nsegs;
+                        seg = &var->segs[buffer_pos];
+                        seg->id = current_seg_id;
+                        seg->duration = (uint64_t)(current_duration * 90000); /* Convert to 90kHz */
+                        seg->size = 0; /* Unknown size for restored segments */
+                        seg->discont = 0; /* Will be set later if needed */
+                        seg_count++;
+                    }
+
+                    if (current_seg_id > max_seg_id) {
+                        max_seg_id = current_seg_id;
+                    }
                 }
             }
         }
@@ -1053,14 +1088,14 @@ ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         }
     }
 
-    if (max_seg_id > 0) {
-        /* Set the next segment ID to continue from where we left off */
-        var->seg = max_seg_id + 1;
-        hls->discont_from = var->seg;
+    if (max_seg_id > 0 && seg_count > 0) {
+        /* Set up the circular buffer state */
+        var->seg = max_seg_id + 1;  /* Next segment to write */
+        hls->discont_from = var->seg; /* Mark next segment for discontinuity */
 
-        ngx_log_debug2(NGX_LOG_DEBUG_CORE, ts->log, 0,
-                       "ts hls restored: next_seg=%ui, discont_from=%ui",
-                       var->seg, hls->discont_from);
+        ngx_log_debug4(NGX_LOG_DEBUG_CORE, ts->log, 0,
+                       "ts hls restored: segments=%ui, next_seg=%ui, media_seq=%ui, discont_from=%ui",
+                       seg_count, var->seg, media_sequence, hls->discont_from);
     } else {
         hls->discont_from = 0;
     }
