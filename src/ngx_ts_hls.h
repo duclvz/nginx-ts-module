@@ -44,7 +44,6 @@ typedef struct {
     ngx_uint_t             nsegs;
     ngx_uint_t             seg;
     uint64_t               seg_dts;
-    unsigned               resumed:1;
 
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;
@@ -65,8 +64,6 @@ typedef struct {
 
     ngx_ts_hls_variant_t  *vars;
     ngx_uint_t             nvars;
-
-    ngx_uint_t             done;  /* unsigned  done:1; */
 } ngx_ts_hls_t;
 
 
