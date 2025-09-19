@@ -458,7 +458,7 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
                        "#EXT-X-VERSION:3\n"
                        "#EXT-X-MEDIA-SEQUENCE:%ui\n"
                        "#EXT-X-TARGETDURATION:%ui\n\n",
-                       have ? ms : 0, td);
+                       have ? ms : var->seg, td);
 
     for (i = 0; i < var->nsegs; i++) {
         seg = &var->segs[(var->seg + i) % var->nsegs];
@@ -700,6 +700,33 @@ ngx_ts_hls_restore(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     if (file.fd == NGX_INVALID_FILE) {
         return;
     }
+    /* Fast restore: parse only media sequence from the head, keep logic simple */
+    ret = ngx_read_file(&file, buf, 2048, 0);
+    if (ret > 0) {
+        p = buf;
+        end = buf + ret;
+        for ( ;; ) {
+            last = ngx_strlchr(p, end, '\n');
+            if (last == NULL) {
+                break;
+            }
+            if (p != last && last[-1] == '\r') {
+                last--;
+            }
+            if ((size_t)(last - p) > sizeof("#EXT-X-MEDIA-SEQUENCE:") - 1
+                && ngx_memcmp(p, "#EXT-X-MEDIA-SEQUENCE:",
+                              sizeof("#EXT-X-MEDIA-SEQUENCE:") - 1) == 0)
+            {
+                var->seg = (ngx_uint_t) ngx_atoi(p + sizeof("#EXT-X-MEDIA-SEQUENCE:") - 1,
+                                                 last - p - (sizeof("#EXT-X-MEDIA-SEQUENCE:") - 1));
+                break;
+            }
+            p = last + 1;
+        }
+    }
+
+    goto done;
+
 
     offset = 0;
     duration = 0;
