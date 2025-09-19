@@ -27,6 +27,9 @@ static ngx_int_t ngx_ts_hls_write_file(u_char *path, u_char *tmp_path,
 static ngx_int_t ngx_ts_hls_open_segment(ngx_ts_hls_t *hls,
     ngx_ts_hls_variant_t *var);
 
+static void ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls,
+    ngx_ts_hls_variant_t *var);
+
 static ngx_msec_t ngx_ts_hls_file_manager(void *data);
 static ngx_int_t ngx_ts_hls_manage_file(ngx_tree_ctx_t *ctx, ngx_str_t *path);
 static ngx_int_t ngx_ts_hls_manage_directory(ngx_tree_ctx_t *ctx,
@@ -152,8 +155,9 @@ ngx_ts_hls_pat_handler(ngx_ts_hls_t *hls)
     size_t                 len;
     u_char                *p;
     ngx_uint_t             n;
+    ngx_str_t              sname;
     ngx_ts_stream_t       *ts;
-    ngx_ts_program_t      *prog;
+    ngx_ts_program_t      *prog, *sel;
     ngx_ts_hls_variant_t  *var;
 
     if (hls->vars) {
@@ -164,112 +168,80 @@ ngx_ts_hls_pat_handler(ngx_ts_hls_t *hls)
 
     ngx_log_debug0(NGX_LOG_DEBUG_CORE, ts->log, 0, "ts hls pat");
 
-    hls->nvars = ts->nprogs;
-    hls->vars = ngx_pcalloc(ts->pool,
-                            sizeof(ngx_ts_hls_variant_t) * ts->nprogs);
+    /* single-variant mode: select one program (prefer video) */
+    sel = NULL;
+    for (n = 0; n < ts->nprogs; n++) {
+        if (ts->progs[n].video) {
+            sel = &ts->progs[n];
+            break;
+        }
+    }
+    if (sel == NULL && ts->nprogs > 0) {
+        sel = &ts->progs[0];
+    }
+    if (sel == NULL) {
+        ngx_log_error(NGX_LOG_ERR, ts->log, 0, "TS program not found");
+        return NGX_ERROR;
+    }
+
+    hls->nvars = 1;
+    hls->vars = ngx_pcalloc(ts->pool, sizeof(ngx_ts_hls_variant_t));
     if (hls->vars == NULL) {
         return NGX_ERROR;
     }
 
-    if (hls->nvars > 1) {
-        /* index.m3u8 */
+    var = &hls->vars[0];
+    var->prog = sel;
+    var->file.fd = NGX_INVALID_FILE;
+    var->file.log = ts->log;
 
-        len = hls->path.len + sizeof("/index.m3u8");
-
-        hls->m3u8_path = ngx_pnalloc(ts->pool, len);
-        if (hls->m3u8_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_sprintf(hls->m3u8_path, "%V/index.m3u8%Z", &hls->path);
-
-        /* index.m3u8.tmp */
-
-        len += sizeof(".tmp") - 1;
-
-        hls->m3u8_tmp_path = ngx_pnalloc(ts->pool, len);
-        if (hls->m3u8_tmp_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_sprintf(hls->m3u8_tmp_path, "%s.tmp%Z", hls->m3u8_path);
+    var->nsegs = hls->conf->nsegs;
+    var->segs = ngx_pcalloc(ts->pool,
+                            sizeof(ngx_ts_hls_segment_t) * hls->conf->nsegs);
+    if (var->segs == NULL) {
+        return NGX_ERROR;
     }
 
-    for (n = 0; n < ts->nprogs; n++) {
-        prog = &ts->progs[n];
-        var = &hls->vars[n];
-
-        var->prog = prog;
-        var->file.fd = NGX_INVALID_FILE;
-        var->file.log = ts->log;
-
-        var->nsegs = hls->conf->nsegs;
-        var->segs = ngx_pcalloc(ts->pool,
-                               sizeof(ngx_ts_hls_segment_t) * hls->conf->nsegs);
-        if (var->segs == NULL) {
-            return NGX_ERROR;
-        }
-
-        /* [<prog>.]<seg>.ts */
-
-        len = hls->path.len + 1 + NGX_INT_T_LEN + sizeof(".ts");
-
-        if (hls->nvars > 1) {
-            len += NGX_INT_T_LEN + 1;
-        }
-
-        p = ngx_pnalloc(ts->pool, len);
-        if (p == NULL) {
-            return NGX_ERROR;
-        }
-
-        var->path.data = p;
-
-        if (hls->nvars > 1) {
-            p = ngx_sprintf(p, "%V/%ui.",
-                            &hls->path, (ngx_uint_t) prog->number);
-
-        } else {
-            p = ngx_sprintf(p, "%V/", &hls->path);
-        }
-
-        var->path.len = p - var->path.data;
-
-        /* (<prog>|index).m3u8 */
-
-        len = hls->path.len + 1 + sizeof(".m3u8");
-
-        if (hls->nvars > 1) {
-            len += NGX_INT_T_LEN;
-
-        } else {
-            len += sizeof("index") - 1;
-        }
-
-        var->m3u8_path = ngx_pnalloc(ts->pool, len);
-        if (var->m3u8_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        if (hls->nvars > 1) {
-            ngx_sprintf(var->m3u8_path, "%V/%ui.m3u8%Z",
-                        &hls->path, (ngx_uint_t) prog->number);
-
-        } else {
-            ngx_sprintf(var->m3u8_path, "%V/index.m3u8%Z", &hls->path);
-        }
-
-        /* (<prog>|index).m3u8.tmp */
-
-        len += sizeof(".tmp") - 1;
-
-        var->m3u8_tmp_path = ngx_pnalloc(ts->pool, len);
-        if (var->m3u8_tmp_path == NULL) {
-            return NGX_ERROR;
-        }
-
-        ngx_sprintf(var->m3u8_tmp_path, "%s.tmp%Z", var->m3u8_path);
+    /* derive stream name from hls->path = conf_path/name */
+    if (hls->path.len <= hls->conf->path->name.len + 1) {
+        ngx_log_error(NGX_LOG_ERR, ts->log, 0, "invalid HLS path");
+        return NGX_ERROR;
     }
+    sname.data = hls->path.data + hls->conf->path->name.len + 1;
+    sname.len  = hls->path.len  - hls->conf->path->name.len - 1;
+
+    /* segment base path: <conf_path>/<stream>-<id>.ts */
+    len = hls->conf->path->name.len + 1 + sname.len + 1 /* '-' */
+          + NGX_INT_T_LEN + sizeof(".ts");
+
+    p = ngx_pnalloc(ts->pool, len);
+    if (p == NULL) {
+        return NGX_ERROR;
+    }
+
+    var->path.data = p;
+    p = ngx_sprintf(p, "%V/%V-", &hls->conf->path->name, &sname);
+    var->path.len = p - var->path.data;
+
+    /* playlist path: <conf_path>/<stream>.m3u8 */
+    len = hls->conf->path->name.len + 1 + sname.len + sizeof(".m3u8");
+
+    var->m3u8_path = ngx_pnalloc(ts->pool, len);
+    if (var->m3u8_path == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_sprintf(var->m3u8_path, "%V/%V.m3u8%Z", &hls->conf->path->name, &sname);
+
+    /* playlist tmp path */
+    len += sizeof(".tmp") - 1;
+    var->m3u8_tmp_path = ngx_pnalloc(ts->pool, len);
+    if (var->m3u8_tmp_path == NULL) {
+        return NGX_ERROR;
+    }
+    ngx_sprintf(var->m3u8_tmp_path, "%s.tmp%Z", var->m3u8_path);
+
+    /* restore previous playlist state for continuous mode (default on) */
+    ngx_ts_hls_restore_playlist(hls, var);
 
     return NGX_OK;
 }
@@ -432,16 +404,28 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
 {
     size_t                 len;
     u_char                *p, *data;
-    uint64_t               maxd;
     ngx_int_t              rc;
-    ngx_uint_t             i, ms, td;
+    ngx_uint_t             i;
     ngx_ts_stream_t       *ts;
     ngx_ts_hls_segment_t  *seg;
+    ngx_uint_t             td, first_id_set, first_id, max_frag;
+    ngx_uint_t             have_old, have_new;
+    ngx_str_t              sname;
 
     ts = hls->ts;
 
     ngx_log_debug1(NGX_LOG_DEBUG_CORE, ts->log, 0,
                    "ts hls update playlist \"%s\"", var->m3u8_path);
+
+    /* derive stream name */
+    sname.data = hls->path.data + hls->conf->path->name.len + 1;
+    sname.len  = hls->path.len  - hls->conf->path->name.len - 1;
+
+    max_frag = (ngx_uint_t) (hls->conf->min_seg / 1000);
+    first_id_set = 0;
+    first_id = 0;
+    have_old = 0;
+    have_new = 0;
 
     len = sizeof("#EXTM3U\n"
                  "#EXT-X-VERSION:3\n"
@@ -449,28 +433,32 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
                  "#EXT-X-TARGETDURATION:\n\n") - 1
           + 2 * NGX_INT_T_LEN;
 
-    maxd = 0;
-
     for (i = 0; i < var->nsegs; i++) {
         seg = &var->segs[(var->seg + i) % var->nsegs];
-
         if (seg->duration) {
-            if (maxd < seg->duration) {
-                maxd = seg->duration;
+            ngx_uint_t cur = (ngx_uint_t) (seg->duration / 90000. + .5);
+            if (cur > max_frag) {
+                max_frag = cur;
             }
-
-            len += sizeof("#EXTINF:.xxx,\n"
-                          ".ts\n") - 1
-                   + 2 * NGX_INT_T_LEN;
-
-            if (hls->nvars > 1) {
-                len += NGX_INT_T_LEN + 1;
+            if (!first_id_set) {
+                first_id = seg->id;
+                first_id_set = 1;
+            }
+            len += sizeof("#EXTINF:.xxx,\n") - 1;
+            len += sname.len + 1 /* '-' */ + NGX_INT_T_LEN + sizeof(".ts\n") - 1;
+            if ((off_t) seg->size < 0) {
+                len += sizeof("#EXT-X-DISCONTINUITY\n") - 1;
+            }
+            if (seg->size <= 0) {
+                have_old = 1;
+            } else {
+                have_new = 1;
             }
         }
     }
 
-    if (hls->done) {
-        len += sizeof("\n#EXT-X-ENDLIST\n") - 1;
+    if (have_old && have_new) {
+        len += sizeof("#EXT-X-DISCONTINUITY\n") - 1;
     }
 
     data = ngx_alloc(len, ts->log);
@@ -479,34 +467,34 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     }
 
     p = data;
-
-    ms = var->seg <= var->nsegs ? 0 : var->seg - var->nsegs;
-    td = (hls->conf->max_seg + 999) / 1000;
+    td = max_frag;
 
     p = ngx_sprintf(p, "#EXTM3U\n"
                        "#EXT-X-VERSION:3\n"
                        "#EXT-X-MEDIA-SEQUENCE:%ui\n"
-                       "#EXT-X-TARGETDURATION:%ui\n\n", ms, td);
+                       "#EXT-X-TARGETDURATION:%ui\n\n",
+                       first_id_set ? first_id : 0, td);
 
-    for (i = 0; i < var->nsegs; i++) {
-        seg = &var->segs[(var->seg + i) % var->nsegs];
-
-        if (seg->duration) {
-            p = ngx_sprintf(p, "#EXTINF:%.3f,\n", seg->duration / 90000.);
-
-            if (hls->nvars > 1) {
-                p = ngx_sprintf(p, "%ui.%ui.ts\n",
-                                (ngx_uint_t) var->prog->number, seg->id);
-
-            } else {
-                p = ngx_sprintf(p, "%ui.ts\n", seg->id);
+    {
+        ngx_uint_t seen_old = 0;
+        ngx_uint_t discont_written = 0;
+        for (i = 0; i < var->nsegs; i++) {
+            seg = &var->segs[(var->seg + i) % var->nsegs];
+            if (seg->duration) {
+                if (!discont_written && seen_old && seg->size > 0) {
+                    p = ngx_sprintf(p, "#EXT-X-DISCONTINUITY\n");
+                    discont_written = 1;
+                }
+                if ((off_t) seg->size < 0) {
+                    p = ngx_sprintf(p, "#EXT-X-DISCONTINUITY\n");
+                }
+                if (seg->size <= 0) {
+                    seen_old = 1;
+                }
+                p = ngx_sprintf(p, "#EXTINF:%.3f,\n", seg->duration / 90000.);
+                p = ngx_sprintf(p, "%V-%ui.ts\n", &sname, seg->id);
             }
         }
-    }
-
-    if (hls->done) {
-        p = ngx_cpymem(p, "\n#EXT-X-ENDLIST\n",
-                       sizeof("\n#EXT-X-ENDLIST\n") - 1);
     }
 
     rc = ngx_ts_hls_write_file(var->m3u8_path, var->m3u8_tmp_path, data,
@@ -577,6 +565,118 @@ ngx_ts_hls_update_master_playlist(ngx_ts_hls_t *hls)
 
     return rc;
 }
+
+
+static void
+ngx_ts_hls_restore_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
+{
+    ngx_file_t   file;
+    ssize_t      ret;
+    off_t        offset;
+    u_char      *p, *last, *end, *next, *pa;
+    double       duration;
+    uint64_t     id, mag, last_id;
+    ngx_uint_t   discont;
+
+    ngx_memzero(&file, sizeof(file));
+
+    file.log = hls->ts->log;
+    ngx_str_set(&file.name, "m3u8");
+
+    file.fd = ngx_open_file(var->m3u8_path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (file.fd == NGX_INVALID_FILE) {
+        return;
+    }
+
+    /* reset buffer */
+    ngx_memzero(var->segs, sizeof(ngx_ts_hls_segment_t) * var->nsegs);
+
+    offset = 0;
+    duration = 0;
+    last_id = 0;
+
+    discont = 0;
+
+
+    for ( ;; ) {
+        u_char buffer[4096];
+
+        ret = ngx_read_file(&file, buffer, sizeof(buffer), offset);
+        if (ret <= 0) {
+            break;
+        }
+
+        p = buffer;
+        end = buffer + ret;
+
+        for ( ;; ) {
+            last = ngx_strlchr(p, end, '\n');
+
+            if (last == NULL) {
+                if (p == buffer) {
+                    goto done;
+                }
+                break;
+            }
+
+            next = last + 1;
+            offset += (next - p);
+
+            if (p != last && last[-1] == '\r') {
+                last--;
+            }
+
+            if ((size_t) (last - p) > sizeof("#EXTINF:") - 1
+                && ngx_memcmp(p, "#EXTINF:", sizeof("#EXTINF:") - 1) == 0)
+            {
+                duration = strtod((const char *)(p + sizeof("#EXTINF:") - 1), NULL);
+            }
+
+            if ((size_t) (last - p) >= sizeof("#EXT-X-DISCONTINUITY") - 1
+                && ngx_memcmp(p, "#EXT-X-DISCONTINUITY",
+                              sizeof("#EXT-X-DISCONTINUITY") - 1) == 0)
+            {
+                discont = 1;
+            }
+
+            /* parse lines ending with '.ts' */
+            if (p + 4 <= last && last[-3] == '.' && last[-2] == 't' && last[-1] == 's')
+            {
+                id = 0;
+                mag = 1;
+                for (pa = last - 4; pa >= p; pa--) {
+                    if (*pa < '0' || *pa > '9') {
+                        break;
+                    }
+                    id += (*pa - '0') * mag;
+                    mag *= 10;
+                }
+
+                if (id > 0 || (pa + 1 < last - 3)) {
+                    ngx_ts_hls_segment_t *seg = &var->segs[(id % var->nsegs)];
+                    seg->id = (ngx_uint_t) id;
+                    seg->duration = (uint64_t) (duration * 90000. + .5);
+                    seg->size = discont ? (off_t) -1 : 0; /* restored; -1 means DISCONT before */
+                    discont = 0;
+
+                    if (id > last_id) {
+                        last_id = id;
+                    }
+                }
+            }
+
+            p = next;
+        }
+    }
+
+done:
+    ngx_close_file(file.fd);
+
+    if (last_id) {
+        var->seg = (ngx_uint_t) (last_id + 1);
+    }
+}
+
 
 
 static ngx_int_t
@@ -677,13 +777,13 @@ ngx_ts_hls_open_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         }
 
         /* XXX dir access mode */
-        if (ngx_create_dir(hls->path.data, 0700) == NGX_FILE_ERROR) {
+        if (ngx_create_dir(hls->conf->path->name.data, 0700) == NGX_FILE_ERROR) {
             err = ngx_errno;
 
             if (err != NGX_EEXIST) {
                 ngx_log_error(NGX_LOG_CRIT, ts->log, err,
                               ngx_create_dir_n " \"%s\" failed",
-                              hls->path.data);
+                              hls->conf->path->name.data);
                 return NGX_ERROR;
             }
         }
