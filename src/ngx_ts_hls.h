@@ -44,7 +44,7 @@ typedef struct {
     ngx_uint_t             nsegs;
     ngx_uint_t             seg;
     uint64_t               seg_dts;
-    ngx_uint_t             need_discont;
+    unsigned               resumed:1;
 
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;

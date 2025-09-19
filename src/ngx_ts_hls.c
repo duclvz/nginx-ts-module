@@ -27,7 +27,7 @@ static ngx_int_t ngx_ts_hls_write_file(u_char *path, u_char *tmp_path,
 static ngx_int_t ngx_ts_hls_open_segment(ngx_ts_hls_t *hls,
     ngx_ts_hls_variant_t *var);
 
-static void ngx_ts_hls_restore(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var);
+static ngx_int_t ngx_ts_hls_restore(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var);
 
 static ngx_msec_t ngx_ts_hls_file_manager(void *data);
 static ngx_int_t ngx_ts_hls_manage_file(ngx_tree_ctx_t *ctx, ngx_str_t *path);
@@ -230,9 +230,8 @@ ngx_ts_hls_pat_handler(ngx_ts_hls_t *hls)
     }
     ngx_sprintf(var->m3u8_tmp_path, "%s.tmp%Z", var->m3u8_path);
 
-    /* continuous mode: restore prior playlist; first new segment should be discont */
-    var->need_discont = 1;
-    ngx_ts_hls_restore(hls, var);
+    /* continuous mode: restore prior playlist; if exists, mark resumed */
+    var->resumed = (ngx_ts_hls_restore(hls, var) == NGX_OK);
 
     return NGX_OK;
 }
@@ -371,8 +370,8 @@ ngx_ts_hls_close_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var,
     seg->id = var->seg++;
     seg->duration = d;
     seg->size = var->file.offset;
-    seg->discont = (var->need_discont != 0);
-    var->need_discont = 0;
+    seg->discont = (var->resumed != 0);
+    var->resumed = 0;
 
     if (ngx_close_file(var->file.fd) == NGX_FILE_ERROR) {
         ngx_log_error(NGX_LOG_ALERT, ts->log, ngx_errno,
@@ -398,7 +397,7 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     size_t                 len;
     u_char                *p, *data;
     ngx_int_t              rc;
-    ngx_uint_t             i, ms, td, have;
+    ngx_uint_t             i, ms, td;
     ngx_ts_stream_t       *ts;
     ngx_ts_hls_segment_t  *seg;
 
@@ -415,8 +414,7 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
           + 2 * NGX_INT_T_LEN;
 
     td = (ngx_uint_t) (hls->conf->min_seg / 1000);
-    ms = 0;
-    have = 0;
+    ms = var->seg;
 
     for (i = 0; i < var->nsegs; i++) {
         seg = &var->segs[(var->seg + i) % var->nsegs];
@@ -424,9 +422,9 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
         if (seg->duration) {
             double dsec = seg->duration / 90000.0;
 
-            if (!have) {
+            /* set media sequence to the first present segment id */
+            if (ms == var->seg) {
                 ms = seg->id;
-                have = 1;
             }
 
             if (dsec > (double) td) {
@@ -458,7 +456,7 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
                        "#EXT-X-VERSION:3\n"
                        "#EXT-X-MEDIA-SEQUENCE:%ui\n"
                        "#EXT-X-TARGETDURATION:%ui\n\n",
-                       have ? ms : var->seg, td);
+                       ms, td);
 
     for (i = 0; i < var->nsegs; i++) {
         seg = &var->segs[(var->seg + i) % var->nsegs];
@@ -680,7 +678,7 @@ ngx_ts_hls_open_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     return NGX_OK;
 }
 
-static void
+static ngx_int_t
 ngx_ts_hls_restore(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
 {
     ngx_file_t        file;
@@ -698,7 +696,7 @@ ngx_ts_hls_restore(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
     file.log = hls->ts->log;
     file.fd = ngx_open_file(var->m3u8_path, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
     if (file.fd == NGX_INVALID_FILE) {
-        return;
+        return NGX_DECLINED;
     }
     /* Fast restore: parse only media sequence from the head, keep logic simple */
     ret = ngx_read_file(&file, buf, 2048, 0);
@@ -819,6 +817,8 @@ ngx_ts_hls_restore(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
 
     /* if there was no media sequence in file but segments parsed, adjust seg */
     (void) mseq_set;
+
+    return NGX_OK;
 }
 
 
