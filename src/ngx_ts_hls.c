@@ -21,7 +21,6 @@ static ngx_int_t ngx_ts_hls_close_segment(ngx_ts_hls_t *hls,
     ngx_ts_hls_variant_t *var, ngx_ts_es_t *es);
 static ngx_int_t ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls,
     ngx_ts_hls_variant_t *var);
-static ngx_int_t ngx_ts_hls_update_master_playlist(ngx_ts_hls_t *hls);
 static ngx_int_t ngx_ts_hls_write_file(u_char *path, u_char *tmp_path,
     u_char *data, size_t len, ngx_log_t *log);
 static ngx_int_t ngx_ts_hls_open_segment(ngx_ts_hls_t *hls,
@@ -91,7 +90,6 @@ ngx_ts_hls_cleanup(void *data)
     ngx_ts_hls_segment_t  *seg;
     ngx_ts_hls_variant_t  *var;
 
-    hls->done = 1;
 
     ts = hls->ts;
 
@@ -395,7 +393,7 @@ ngx_ts_hls_close_segment(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var,
         return NGX_ERROR;
     }
 
-    return ngx_ts_hls_update_master_playlist(hls);
+    return NGX_OK;
 }
 
 
@@ -506,65 +504,6 @@ ngx_ts_hls_update_playlist(ngx_ts_hls_t *hls, ngx_ts_hls_variant_t *var)
 }
 
 
-static ngx_int_t
-ngx_ts_hls_update_master_playlist(ngx_ts_hls_t *hls)
-{
-    size_t                 len;
-    u_char                *p, *data;
-    ngx_int_t              rc;
-    ngx_uint_t             n;
-    ngx_ts_stream_t       *ts;
-    ngx_ts_hls_variant_t  *var;
-
-    /* TODO touch file if it exists*/
-
-    if (hls->nvars == 1) {
-        return NGX_OK;
-    }
-
-    ts = hls->ts;
-
-    ngx_log_debug1(NGX_LOG_DEBUG_CORE, ts->log, 0,
-                   "ts hls update master playlist \"%s\"", hls->m3u8_path);
-
-    len = sizeof("#EXTM3U\n") - 1;
-
-    for (n = 0; n < hls->nvars; n++) {
-        var = &hls->vars[n];
-
-        if (var->bandwidth == 0) {
-            ngx_log_debug0(NGX_LOG_DEBUG_CORE, ts->log, 0,
-                           "ts hls bandwidth not available");
-            return NGX_OK;
-        }
-
-        len += sizeof("#EXT-X-STREAM-INF:BANDWIDTH=\n") - 1 + NGX_INT_T_LEN
-               + NGX_INT_T_LEN + sizeof(".m3u8\n") - 1;
-    }
-
-    data = ngx_alloc(len, ts->log);
-    if (data == NULL) {
-        return NGX_ERROR;
-    }
-
-    p = data;
-
-    p = ngx_cpymem(p, "#EXTM3U\n", sizeof("#EXTM3U\n") - 1);
-
-    for (n = 0; n < hls->nvars; n++) {
-        var = &hls->vars[n];
-
-        p = ngx_sprintf(p, "#EXT-X-STREAM-INF:BANDWIDTH=%ui\n%ui.m3u8\n",
-                        var->bandwidth, (ngx_uint_t) var->prog->number);
-    }
-
-    rc = ngx_ts_hls_write_file(hls->m3u8_path, hls->m3u8_tmp_path, data,
-                               p - data, ts->log);
-
-    ngx_free(data);
-
-    return rc;
-}
 
 
 static void
