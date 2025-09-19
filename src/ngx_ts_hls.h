@@ -28,6 +28,7 @@ typedef struct {
     ngx_uint_t             id;
     uint64_t               duration;
     off_t                  size;
+    unsigned               discont:1;
 } ngx_ts_hls_segment_t;
 
 
@@ -43,6 +44,7 @@ typedef struct {
     ngx_uint_t             nsegs;
     ngx_uint_t             seg;
     uint64_t               seg_dts;
+    ngx_uint_t             need_discont;
 
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;
@@ -59,6 +61,7 @@ typedef struct {
     u_char                *m3u8_path;
     u_char                *m3u8_tmp_path;
     ngx_str_t              path;
+    ngx_str_t              name;
 
     ngx_ts_hls_variant_t  *vars;
     ngx_uint_t             nvars;
